@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: bot-eventos
+    env: python
+    buildCommand: "pip install -r requirements.txt && playwright install chromium"
+    startCommand: "python main.py" # Asegúrate que el nombre coincida con tu archivo
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+        
