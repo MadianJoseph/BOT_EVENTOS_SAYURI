@@ -14,19 +14,16 @@ CHECK_INTERVAL = 90
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
-# Credenciales de Sayuri
 USER = os.getenv("WEB_USER")
 PASS = os.getenv("WEB_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-LUGARES_OK = ["PALACIO DE LOS DEPORTES", "ESTADIO GNP", "AUTODROMO HERMANOS RODRIGUEZ", "ESTADIO ALFREDO HARP HELU", "DIABLOS"]
-
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"Bot Sayuri 24/7 Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
+    return f"Bot Madian Híbrido Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -34,28 +31,6 @@ def send(msg):
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                       data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
-
-def analizar_sayuri(info):
-    titulo = info['titulo'].upper()
-    lugar = info['lugar'].upper()
-    is_bloque = info['is_bloque']
-    try:
-        inicio_dt = TZ.localize(datetime.strptime(info['inicio'], "%d/%m/%Y %H:%M"))
-    except: return False, "Error fecha"
-
-    if is_bloque: return False, "Evento BLOQUE (Revisión manual)"
-    if not any(l in lugar for l in LUGARES_OK): return False, "Lugar no permitido"
-    if "TRASLADO" in titulo or "GIRA" in titulo: return False, "Traslado/Gira"
-    
-    # Sayuri acepta cualquier turnaje (1, 1.5, 2, 2.5)
-    # Filtro de horario nocturno
-    if inicio_dt.hour >= 17: return False, "Nocturna (Entrada tarde)"
-    
-    # Domingo temprano
-    if inicio_dt.weekday() == 6 and (inicio_dt.hour < 9 or (inicio_dt.hour == 9 and inicio_dt.minute < 30)):
-        return False, "Domingo mañana"
-
-    return True, "Filtros OK"
 
 def bot_worker():
     with sync_playwright() as p:
@@ -66,9 +41,6 @@ def bot_worker():
 
         while True:
             try:
-                # SE ELIMINÓ LA RESTRICCIÓN DE IF (6 <= now.hour < 24)
-                # Ahora el bot siempre intentará entrar.
-
                 if not logged:
                     page.goto(URL_LOGIN)
                     page.wait_for_timeout(3000)
@@ -82,38 +54,31 @@ def bot_worker():
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                if "ID USUARIO" in content.upper():
-                    logged = False; continue
+                # 1. VERIFICACIÓN CRÍTICA (Como el bot original)
+                if NO_EVENTS_TEXT not in content and "EVENTOS DISPONIBLES" in content:
+                    # PRIMER AVISO: ¡Algo cambió! (Aviso instantáneo)
+                    send(f"🚨 *MADIAN: ¡EVENTOS DETECTADOS!* 🚨\nRevisa de inmediato, el sistema muestra cambios.")
+                    
+                    # 2. INTENTO DE ANÁLISIS (Si falla, no importa, ya te avisó arriba)
+                    try:
+                        # Extraemos un resumen rápido de lo que se ve en pantalla sin hacer clics
+                        resumen = content.split("EVENTOS DISPONIBLES")[-1].split("EVENTOS CONFIRMADOS")[0].strip()
+                        if len(resumen) > 10:
+                            send(f"📝 *Detalle rápido:* \n`{resumen[:500]}`")
+                    except:
+                        send("⚠️ No pude extraer el detalle, pero hay eventos en la lista.")
 
-                if NO_EVENTS_TEXT not in content:
-                    eventos_visibles = page.query_selector_all(".row-evento, .card-evento")
-                    for ev in eventos_visibles:
-                        es_bloque = "BLOQUE" in ev.inner_text().upper()
-                        ev.click()
-                        page.wait_for_timeout(3000)
-                        
-                        # Simulación de extracción
-                        info = {"titulo": "SAYURI 24/7", "lugar": "ESTADIO GNP", "inicio": "20/02/2026 13:30", "turnos": "2.0", "is_bloque": es_bloque}
-                        
-                        apto, motivo = analizar_sayuri(info)
-                        if apto:
-                            # page.click("#confirmar")
-                            send(f"✅ SAYURI (24/7): CONFIRMADO {info['titulo']}")
-                        else:
-                            send(f"📋 SAYURI (24/7): {info['titulo']} - {motivo}")
                 else:
-                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sayuri Vigilando...")
+                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Madian: Todo tranquilo.")
 
             except Exception as e:
-                print(f"Error Sayuri: {e}")
+                print(f"Error: {e}")
                 logged = False
                 time.sleep(30)
             
             time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    t = threading.Thread(target=bot_worker, daemon=True)
-    t.start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    threading.Thread(target=bot_worker, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
     
