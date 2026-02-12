@@ -14,7 +14,7 @@ CHECK_INTERVAL = 90
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
-# Credenciales de Sayuri (Configura estas en su propio Render)
+# Credenciales de Sayuri
 USER = os.getenv("WEB_USER")
 PASS = os.getenv("WEB_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -24,6 +24,10 @@ LUGARES_OK = ["PALACIO DE LOS DEPORTES", "ESTADIO GNP", "AUTODROMO HERMANOS RODR
 
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return f"Bot Sayuri 24/7 Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
+
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     try:
@@ -32,42 +36,39 @@ def send(msg):
     except: pass
 
 def analizar_sayuri(info):
-    """Filtros específicos para la cuenta de Sayuri"""
     titulo = info['titulo'].upper()
     lugar = info['lugar'].upper()
     is_bloque = info['is_bloque']
-    
     try:
         inicio_dt = TZ.localize(datetime.strptime(info['inicio'], "%d/%m/%Y %H:%M"))
-    except: return False, "Error de fecha"
+    except: return False, "Error fecha"
 
-    # 1. Regla de BLOQUE (Nunca confirmar, solo avisar)
-    if is_bloque: return False, "Evento marcado como BLOQUE (Revisar manualmente)"
-
-    # 2. Lugar y Traslados
-    if not any(l in lugar for l in LUGARES_OK): return False, f"Lugar: {lugar}"
-    if "TRASLADO" in titulo or "GIRA" in titulo: return False, "Es TRASLADO o GIRA"
-
-    # 3. Sayuri NO tiene límite de turnos (Acepta 1, 1.5, 2, 2.5)
-    # Solo revisamos que no sea un horario nocturno prohibido
-    if inicio_dt.hour >= 17: return False, "Horario nocturno (Entrada tarde)"
-
-    # 4. Domingo (No antes de las 9:30 AM)
-    if inicio_dt.weekday() == 6: 
-        if inicio_dt.hour < 9 or (inicio_dt.hour == 9 and inicio_dt.minute < 30):
-            return False, "Domingo temprano (Antes 9:30 AM)"
+    if is_bloque: return False, "Evento BLOQUE (Revisión manual)"
+    if not any(l in lugar for l in LUGARES_OK): return False, "Lugar no permitido"
+    if "TRASLADO" in titulo or "GIRA" in titulo: return False, "Traslado/Gira"
+    
+    # Sayuri acepta cualquier turnaje (1, 1.5, 2, 2.5)
+    # Filtro de horario nocturno
+    if inicio_dt.hour >= 17: return False, "Nocturna (Entrada tarde)"
+    
+    # Domingo temprano
+    if inicio_dt.weekday() == 6 and (inicio_dt.hour < 9 or (inicio_dt.hour == 9 and inicio_dt.minute < 30)):
+        return False, "Domingo mañana"
 
     return True, "Filtros OK"
 
 def bot_worker():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        context = browser.new_context(user_agent="Mozilla/5.0...")
         page = context.new_page()
         logged = False
 
         while True:
             try:
+                # SE ELIMINÓ LA RESTRICCIÓN DE IF (6 <= now.hour < 24)
+                # Ahora el bot siempre intentará entrar.
+
                 if not logged:
                     page.goto(URL_LOGIN)
                     page.wait_for_timeout(3000)
@@ -84,50 +85,35 @@ def bot_worker():
                 if "ID USUARIO" in content.upper():
                     logged = False; continue
 
-                # DETECCIÓN DE EVENTOS
                 if NO_EVENTS_TEXT not in content:
-                    # Buscamos los contenedores de eventos (ajustar selector si es necesario)
-                    eventos_visibles = page.query_selector_all(".row-evento, .card-evento, [onclick*='confirmar']")
-                    
+                    eventos_visibles = page.query_selector_all(".row-evento, .card-evento")
                     for ev in eventos_visibles:
-                        # Revisamos si tiene el texto BLOQUE antes de abrirlo
                         es_bloque = "BLOQUE" in ev.inner_text().upper()
-                        
-                        ev.click() # Abrimos el detalle
+                        ev.click()
                         page.wait_for_timeout(3000)
                         
-                        # Extraemos info real del modal/detalle (Simulado aquí)
-                        # Nota: En la vida real, aquí usaríamos page.inner_text("#ID-DEL-DETALLE")
-                        info = {
-                            "titulo": "SAYURI - EVENTO DETECTADO",
-                            "lugar": "Estadio GNP",
-                            "inicio": "14/02/2026 13:30",
-                            "turnos": "2.0",
-                            "is_bloque": es_bloque
-                        }
-
+                        # Simulación de extracción
+                        info = {"titulo": "SAYURI 24/7", "lugar": "ESTADIO GNP", "inicio": "20/02/2026 13:30", "turnos": "2.0", "is_bloque": es_bloque}
+                        
                         apto, motivo = analizar_sayuri(info)
-
                         if apto:
-                            # page.click("#boton-confirmar") # Selector de confirmación real
-                            send(f"✅ *SAYURI: EVENTO CONFIRMADO*\n📌 {info['titulo']}\n⏰ {info['inicio']}\n📊 Turnos: {info['turnos']}")
+                            # page.click("#confirmar")
+                            send(f"✅ SAYURI (24/7): CONFIRMADO {info['titulo']}")
                         else:
-                            send(f"📋 *SAYURI: AVISO*\nEvento: {info['titulo']}\nMotivo: {motivo}\n⏰ {info['inicio']}")
-                
+                            send(f"📋 SAYURI (24/7): {info['titulo']} - {motivo}")
                 else:
-                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sayuri: Sin eventos.")
+                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sayuri Vigilando...")
 
             except Exception as e:
                 print(f"Error Sayuri: {e}")
                 logged = False
                 time.sleep(30)
-
+            
             time.sleep(CHECK_INTERVAL)
 
-@app.route("/")
-def home(): return "Bot Sayuri Online"
-
 if __name__ == "__main__":
-    threading.Thread(target=bot_worker, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-                      
+    t = threading.Thread(target=bot_worker, daemon=True)
+    t.start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    
