@@ -26,7 +26,7 @@ PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID"]
 app = Flask(__name__)
 
 @app.route("/")
-def home(): return "Bot Sayuri (Tablas/Sin Limites) Activo"
+def home(): return f"Bot Sayuri (Filtro Silencioso) Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -50,24 +50,16 @@ def extraer_datos_tabla(html_content):
 def analizar_sayuri(info, titulo_card, es_bloque):
     titulo = titulo_card.upper()
     lugar = info['lugar'].upper()
-    
     try:
         inicio_dt = TZ.localize(datetime.strptime(info['inicio'], "%d/%m/%Y %H:%M"))
     except: return False, "Fecha no legible"
 
-    # REGLAS SAYURI (Más relajadas)
     if es_bloque: return False, "Es BLOQUE"
     if not any(l in lugar for l in LUGARES_OK): return False, f"Lugar: {lugar}"
     if "TRASLADO" in titulo or "GIRA" in titulo: return False, "Es TRASLADO/GIRA"
     if any(p in titulo for p in PUESTOS_NO): return False, "Puesto prohibido"
-    
-    # Sayuri NO tiene filtro de turnos (Acepta > 1.5)
-    # Sayuri NO tiene filtro de Domingo (Puede antes de las 9:30 AM)
-    
-    # Filtro Nocturno (Este sí lo mantiene por seguridad)
-    if inicio_dt.hour >= 17: return False, "Horario nocturno (Entrada tarde)"
-
-    return True, "Filtros OK"
+    if inicio_dt.hour >= 17: return False, "Horario nocturno"
+    return True, "OK"
 
 def bot_worker():
     with sync_playwright() as p:
@@ -75,61 +67,41 @@ def bot_worker():
         context = browser.new_context(user_agent="Mozilla/5.0...")
         page = context.new_page()
         logged = False
-
         while True:
             try:
                 if not logged:
                     page.goto(URL_LOGIN)
-                    page.wait_for_timeout(3000)
-                    # Intento de login flexible
-                    if page.query_selector("input[name='usuario']"):
-                        page.fill("input[name='usuario']", USER)
-                        page.fill("input[name='password']", PASS)
-                        page.click("button[type='submit']")
-                    else:
-                        page.keyboard.press("Tab"); page.keyboard.type(USER)
-                        page.keyboard.press("Tab"); page.keyboard.type(PASS); page.keyboard.press("Enter")
+                    page.keyboard.press("Tab"); page.keyboard.type(USER)
+                    page.keyboard.press("Tab"); page.keyboard.type(PASS); page.keyboard.press("Enter")
                     page.wait_for_timeout(8000); logged = True
 
                 page.goto(URL_EVENTS, wait_until="networkidle")
-                content = page.inner_text("body")
-
-                if NO_EVENTS_TEXT not in content:
+                if NO_EVENTS_TEXT not in page.content():
                     cards = page.query_selector_all(".card.border")
                     for card in cards:
+                        # FILTRO CRÍTICO: Solo procesar si tiene botón CONFIRMAR
+                        btn_confirmar = card.query_selector("button:has-text('CONFIRMAR')")
+                        if not btn_confirmar: continue 
+
                         titulo_elem = card.query_selector("h6 a")
                         if not titulo_elem: continue
                         titulo_texto = titulo_elem.inner_text()
                         es_bloque = "BLOQUE" in card.inner_text().upper()
 
-                        # Desplegar
-                        titulo_elem.click()
-                        page.wait_for_timeout(2000)
-
-                        # Leer tabla
+                        titulo_elem.click(); page.wait_for_timeout(2000)
                         tabla_elem = card.query_selector(".table-responsive")
                         if not tabla_elem: continue
                         info = extraer_datos_tabla(tabla_elem.inner_html())
                         
                         apto, motivo = analizar_sayuri(info, titulo_texto, es_bloque)
-                        
                         if apto:
-                            btn_confirmar = card.query_selector("button:has-text('CONFIRMAR')")
-                            if btn_confirmar:
-                                btn_confirmar.click()
-                                page.wait_for_timeout(2000)
-                                send(f"✅ *SAYURI: CONFIRMADO EXITOSAMENTE*\n📌 {titulo_texto}\n📍 {info['lugar']}\n⏰ {info['inicio']}\n📊 Turnos: {info['turnos']}")
-                            else:
-                                send(f"⚠️ *SAYURI:* Filtros OK pero no encontré botón CONFIRMAR en {titulo_texto}")
+                            btn_confirmar.click(); page.wait_for_timeout(2000)
+                            send(f"✅ *SAYURI: CONFIRMADO*\n📌 {titulo_texto}\n📍 {info['lugar']}\n⏰ {info['inicio']}")
                         else:
-                            # Aviso de por qué no se tomó
-                            send(f"📋 *SAYURI (AVISO):* No se confirmó automático.\n📌 {titulo_texto}\n❌ Motivo: {motivo}\n⏰ {info['inicio']}")
-
+                            send(f"📋 *SAYURI (AVISO):* {titulo_texto}\n❌ Motivo: {motivo}\n⏰ {info['inicio']}")
                 else:
                     print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sayuri: Sin eventos.")
-
-            except Exception as e:
-                print(f"Error Sayuri: {e}"); logged = False; time.sleep(30)
+            except: logged = False; time.sleep(30)
             time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
