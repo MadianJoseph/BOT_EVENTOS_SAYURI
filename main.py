@@ -1,109 +1,120 @@
-import time
-import requests
-import threading
-import os
-import re
-from datetime import datetime
-import pytz
-from flask import Flask
+import time, re, requests, pytz, os
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
-# ================= CONFIGURACIÓN =================
-URL_LOGIN = "https://eventossistema.com.mx/login.html"
-URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
-CHECK_INTERVAL = 90 
-NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
-TZ = pytz.timezone("America/Mexico_City")
-
+# === CONFIGURACIÓN SAYURI (RENDER ENV) ===
 USER = os.getenv("WEB_USER")
 PASS = os.getenv("WEB_PASS")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+URL_LOGIN = "https://eventossistema.com.mx/login/default.html"
+URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
+TZ = pytz.timezone("America/Mexico_City")
+
 LUGARES_OK = ["PALACIO DE LOS DEPORTES", "ESTADIO GNP", "AUTODROMO HERMANOS RODRIGUEZ", "ESTADIO ALFREDO HARP HELU", "DIABLOS"]
-PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID"]
-
-app = Flask(__name__)
-
-@app.route("/")
-def home(): return f"Bot Sayuri (Filtro Silencioso) Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
+PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID", "MODULOS", "TAQUILLA", "CASHLESS", "CCTV", "ACOMODADORA"]
+TOP_EVENTS = ["ACDC", "SYSTEM OF A DOWN", "BTS"]
 
 def send(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID: return
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                       data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+    if not TOKEN or not CHAT_ID: return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                      data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def extraer_datos_tabla(html_content):
-    info = {"titulo": "", "puesto": "", "inicio": "", "lugar": "", "turnos": "0"}
-    lugar_match = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html_content)
-    if lugar_match: info['lugar'] = lugar_match.group(1).strip()
-    horario_match = re.search(r'HORARIO</td><td.*?>(.*?)</td>', html_content, re.DOTALL)
-    if horario_match:
-        texto_h = horario_match.group(1)
-        fecha_m = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2})', texto_h)
-        if fecha_m: info['inicio'] = fecha_m.group(1)
-        turnos_m = re.search(r'TURNOS\s*(\d+\.?\d*)', texto_h, re.IGNORECASE)
-        if turnos_m: info['turnos'] = turnos_m.group(1)
-    return info
-
-def analizar_sayuri(info, titulo_card, es_bloque):
-    titulo = titulo_card.upper()
-    lugar = info['lugar'].upper()
+def extraer_datos(html):
+    d = {"lugar": "", "puesto": "", "turnos": "0", "inicio": "", "fin": ""}
     try:
-        inicio_dt = TZ.localize(datetime.strptime(info['inicio'], "%d/%m/%Y %H:%M"))
-    except: return False, "Fecha no legible"
+        lugar = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html, re.I)
+        d['lugar'] = lugar.group(1).strip().upper() if lugar else ""
+        puesto = re.search(r'PUESTO</td><td.*?>(.*?)</td>', html, re.I)
+        d['puesto'] = puesto.group(1).strip().upper() if puesto else ""
+        turnos = re.search(r'TURNOS:?\s*([\d.]+)', html, re.I)
+        d['turnos'] = turnos.group(1).strip() if turnos else "0"
+        horario = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2}) AL (\d{2}/\d{2}/\d{4} \d{2}:\d{2})', html)
+        if horario:
+            d['inicio'], d['fin'] = horario.group(1), horario.group(2)
+    except: pass
+    return d
 
-    if es_bloque: return False, "Es BLOQUE"
-    if not any(l in lugar for l in LUGARES_OK): return False, f"Lugar: {lugar}"
-    if "TRASLADO" in titulo or "GIRA" in titulo: return False, "Es TRASLADO/GIRA"
-    if any(p in titulo for p in PUESTOS_NO): return False, "Puesto prohibido"
-    if inicio_dt.hour >= 17: return False, "Horario nocturno"
-    return True, "OK"
+def analizar_sayuri(d, titulo, es_bloque):
+    ahora = datetime.now(TZ)
+    titulo_u = titulo.upper()
+    todo_texto = (titulo_u + " " + d['puesto']).upper()
 
-def bot_worker():
+    # 1. TRASLADO / GIRA / BLOQUE
+    if any(x in titulo_u for x in ["TRASLADO", "GIRA"]) or es_bloque:
+        return False, "⚠️ TRASLADO/GIRA/BLOQUE detectado"
+
+    # 2. EVENTOS TOP (ACDC, SOAD, BTS)
+    if any(top in titulo_u for top in TOP_EVENTS):
+        return True, "🔥 EVENTO TOP SAYURI 🔥"
+
+    # 3. FILTRO DE LUGAR
+    if not any(l in d['lugar'] for l in LUGARES_OK):
+        return False, f"📍 Lugar no permitido: {d['lugar']}"
+
+    # 4. FILTRO DE PUESTOS
+    if any(p in todo_texto for p in PUESTOS_NO):
+        return False, f"🚫 Puesto excluido: {todo_texto}"
+    
+    # 5. REGLA 84 HORAS
+    try:
+        inicio_dt = TZ.localize(datetime.strptime(d['inicio'], "%d/%m/%Y %H:%M"))
+        if ahora > (inicio_dt - timedelta(hours=84)):
+            return False, "⏳ Menos de 84h para el evento"
+    except: return False, "❌ Error en fecha"
+
+    # Sayuri acepta domingos temprano, nocturnos y cualquier cantidad de turnos (priorizando altos)
+    return True, "✅ CUMPLE FILTROS SAYURI"
+
+def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        context = browser.new_context(user_agent="Mozilla/5.0...")
-        page = context.new_page()
-        logged = False
-        while True:
-            try:
-                if not logged:
-                    page.goto(URL_LOGIN)
-                    page.keyboard.press("Tab"); page.keyboard.type(USER)
-                    page.keyboard.press("Tab"); page.keyboard.type(PASS); page.keyboard.press("Enter")
-                    page.wait_for_timeout(8000); logged = True
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        try:
+            page.goto(URL_LOGIN)
+            page.fill('input[name="usuario"]', USER)
+            page.fill('input[name="password"]', PASS)
+            page.click('button[type="submit"]')
+            page.wait_for_timeout(5000)
 
+            while True:
                 page.goto(URL_EVENTS, wait_until="networkidle")
-                if NO_EVENTS_TEXT not in page.content():
-                    cards = page.query_selector_all(".card.border")
+                cont = page.query_selector("#div_eventos_disponibles")
+                
+                if cont and "No hay eventos" not in cont.inner_text():
+                    cards = cont.query_selector_all(".card")
                     for card in cards:
-                        # FILTRO CRÍTICO: Solo procesar si tiene botón CONFIRMAR
-                        btn_confirmar = card.query_selector("button:has-text('CONFIRMAR')")
-                        if not btn_confirmar: continue 
-
-                        titulo_elem = card.query_selector("h6 a")
-                        if not titulo_elem: continue
-                        titulo_texto = titulo_elem.inner_text()
-                        es_bloque = "BLOQUE" in card.inner_text().upper()
-
-                        titulo_elem.click(); page.wait_for_timeout(2000)
-                        tabla_elem = card.query_selector(".table-responsive")
-                        if not tabla_elem: continue
-                        info = extraer_datos_tabla(tabla_elem.inner_html())
+                        link = card.query_selector("h6 a")
+                        if not link: continue
                         
-                        apto, motivo = analizar_sayuri(info, titulo_texto, es_bloque)
-                        if apto:
-                            btn_confirmar.click(); page.wait_for_timeout(2000)
-                            send(f"✅ *SAYURI: CONFIRMADO*\n📌 {titulo_texto}\n📍 {info['lugar']}\n⏰ {info['inicio']}")
+                        titulo = link.inner_text().strip()
+                        link.click() 
+                        page.wait_for_timeout(1500)
+                        
+                        info = extraer_datos(card.inner_html())
+                        es_bloque = "BLOQUE" in card.inner_text().upper()
+                        
+                        apto, motivo = analizar_sayuri(info, titulo, es_bloque)
+                        btn = card.query_selector("button:has-text('CONFIRMAR')")
+
+                        if apto and btn:
+                            btn.click()
+                            page.wait_for_timeout(2000)
+                            if "EVENTO LLENO" in page.content().upper():
+                                send(f"❌ SAYURI: EVENTO LLENO\n🎫 {titulo}")
+                            else:
+                                send(f"✅ SAYURI: CONFIRMADO EXITOSAMENTE\n🎫 {titulo}\n📍 {info['lugar']}\n⏳ {info['turnos']} turnos")
                         else:
-                            send(f"📋 *SAYURI (AVISO):* {titulo_texto}\n❌ Motivo: {motivo}\n⏰ {info['inicio']}")
-                else:
-                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sayuri: Sin eventos.")
-            except: logged = False; time.sleep(30)
-            time.sleep(CHECK_INTERVAL)
+                            send(f"📋 SAYURI (DISPONIBLE): {titulo}\n❌ MOTIVO: {motivo}\n📍 Lugar: {info['lugar']}")
+                
+                time.sleep(90)
+                page.reload()
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
-    threading.Thread(target=bot_worker, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    run()
